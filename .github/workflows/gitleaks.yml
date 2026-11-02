@@ -1,0 +1,49 @@
+name: Gitleaks
+on:
+  pull_request:
+
+# PRs are scanned before merge, so the push:[main] trigger only re-scanned the
+# same history a second time. Cancel superseded runs on rapid pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION="8.21.2"
+          # Pre-installed via Homebrew on the self-hosted runners; only fetch on
+          # hosted runners. No sudo: writes to $HOME/.local/bin and extends PATH
+          # through GITHUB_PATH, which works identically on Linux and macOS.
+          # Must match the pin, not merely exist. The self-hosted runners carry
+          # a Homebrew gitleaks that drifts ahead of VERSION, and a newer
+          # ruleset reports different findings — a scanner whose result depends
+          # on which runner picked up the job is worse than a slow one.
+          if [ "$(command -v gitleaks >/dev/null 2>&1 && gitleaks version 2>/dev/null)" = "${VERSION}" ]; then
+            echo "gitleaks ${VERSION} already present"
+            exit 0
+          fi
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          case "$(uname -m)" in
+            x86_64) ARCH=x64 ;;
+            arm64|aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -sSL --retry 3 --retry-all-errors -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_${OS}_${ARCH}.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          mkdir -p "$HOME/.local/bin"
+          mv gitleaks "$HOME/.local/bin/gitleaks"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gitleaks" version
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose --exit-code 1
